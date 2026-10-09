@@ -18,6 +18,8 @@ https://github.com/user-attachments/assets/47f61a0c-7610-493e-8a5c-aeed5731cdc2
 
 <div align="center"><sub><em>News: added v2.5.0 compatibility</em></sub></div>
 
+<div align="center"><sub>This is a fork by <a href="https://github.com/jayvesmir">jayvesmir</a> of <a href="https://github.com/AdiAmbassador/caelestia-aw">AdiAmbassador/caelestia-aw</a>. The v2.5.0 compatibility port was written by Claude Opus 5.5 (AI agent).</sub></div>
+
 ## What is this?
 
 Caelestia-AW is a patch that adds **native animated/video wallpaper support** to Caelestia. It extends the wallpaper picker with a dedicated animated section, generates thumbnails for video files, and integrates fully with Caelestia's Material You dynamic color system.
