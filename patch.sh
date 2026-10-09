@@ -203,6 +203,13 @@ run_step "CMake configuration" cmake -B /tmp/caelestia-shell-fork/build \
     -DVERSION="$SHELL_VERSION"
 
 run_compile_step "Compiling C++ plugins" cmake --build /tmp/caelestia-shell-fork/build
+
+# cmake --install only adds files, so clear out the old config first. Older
+# patchers copied whole repos over it, and stale QML left behind breaks the shell.
+SHELL_DEST="$(sed -n 's/^INSTALL_QSCONFDIR:STRING=//p' /tmp/caelestia-shell-fork/build/CMakeCache.txt)"
+if [[ "$SHELL_DEST" == */quickshell/caelestia ]]; then
+    run_step "Old shell files removed" sudo rm -rf "$SHELL_DEST"
+fi
 run_step "Shell files patched" sudo cmake --install /tmp/caelestia-shell-fork/build
 
 log "Patching CLI files..."

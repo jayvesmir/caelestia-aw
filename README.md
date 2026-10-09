@@ -81,8 +81,8 @@ caelestia install
 The next script clones my repo and installs the patches in place.
 
 ```bash
-git clone https://github.com/jayvesmir/caelestia-aw.git ~/.local/share/caelestia-aw
-~/.local/share/caelestia-aw/patch.sh 
+git clone https://github.com/jayvesmir/caelestia-aw.git ~/.local/share/caelestia-aw && \
+    ~/.local/share/caelestia-aw/patch.sh
 ```
 
 
@@ -92,11 +92,11 @@ git clone https://github.com/jayvesmir/caelestia-aw.git ~/.local/share/caelestia
 If you already have Caelestia installed and just want to add animated wallpaper support:
 
 ```bash
-git clone https://github.com/jayvesmir/caelestia-aw.git ~/.local/share/caelestia-aw
-~/.local/share/caelestia-aw/patch.sh 
+git clone https://github.com/jayvesmir/caelestia-aw.git ~/.local/share/caelestia-aw && \
+    ~/.local/share/caelestia-aw/patch.sh
 ```
 
-If you already have a clone of the original AdiAmbassador/caelestia-aw, point it at this fork instead:
+> **Already have `~/.local/share/caelestia-aw`?** If it is a clone of the original AdiAmbassador/caelestia-aw, the clone above will fail and running its old `patch.sh` will install 2.3.0-era files that break Caelestia 2.5.0. Point it at this fork instead:
 
 ```bash
 cd ~/.local/share/caelestia-aw
@@ -111,7 +111,7 @@ The patch script will:
 
 1. Clone the supported upstream releases (shell v2.5.0, CLI v1.1.3) and apply the patches from `patches/`.
 2. Install any missing dependencies (`ffmpeg`, `qt6-multimedia`, `qt6-multimedia-ffmpeg`, `cmake`, `ninja`) via `pacman`.
-3. Build the shell and its C++ plugins, install them with `sudo cmake --install`, and copy the patched CLI files into your Python site-packages.
+3. Build the shell and its C++ plugins, replace `/etc/xdg/quickshell/caelestia` with the patched shell, and copy the patched CLI files into your Python site-packages.
 4. Restart Caelestia automatically.
 
 ------

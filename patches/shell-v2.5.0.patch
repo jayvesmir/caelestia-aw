@@ -1,4 +1,4 @@
-From dbe46cd819bc9a3fc4d9205dfa31f26cf3da6a5f Mon Sep 17 00:00:00 2001
+From 8993924750cf0551ada02af52a07b69c1e2b01ce Mon Sep 17 00:00:00 2001
 From: jayvesmir <pznrcmh977@privaterelay.appleid.com>
 Date: Fri, 9 Oct 2026 18:24:23 +0200
 Subject: [PATCH] feat: animated wallpaper support (caelestia-aw) for shell
@@ -15,9 +15,9 @@ Subject: [PATCH] feat: animated wallpaper support (caelestia-aw) for shell
  modules/nexus/common/WallItem.qml         |  14 +-
  modules/nexus/pages/WallpaperAndStyle.qml |  75 +++-
  services/Colours.qml                      |  16 +
- services/WallpaperPauser.qml              | 147 ++++++++
+ services/WallpaperPauser.qml              | 149 ++++++++
  services/Wallpapers.qml                   | 328 +++++++++++++++--
- 12 files changed, 1333 insertions(+), 206 deletions(-)
+ 12 files changed, 1335 insertions(+), 206 deletions(-)
  create mode 100644 modules/background/VideoWallpaper.qml
  create mode 100644 services/WallpaperPauser.qml
 
@@ -1410,10 +1410,10 @@ index 0b644001..6399f34f 100644
      function setMode(mode: string): void {
 diff --git a/services/WallpaperPauser.qml b/services/WallpaperPauser.qml
 new file mode 100644
-index 00000000..bda99dc1
+index 00000000..92ca16e1
 --- /dev/null
 +++ b/services/WallpaperPauser.qml
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,149 @@
 +pragma Singleton
 +
 +import QtQuick
@@ -1424,6 +1424,7 @@ index 00000000..bda99dc1
 +import Quickshell.Io
 +
 +import qs.services
++import qs.utils
 +
 +Singleton {
 +    id: root
@@ -1434,6 +1435,7 @@ index 00000000..bda99dc1
 +
 +    Settings {
 +        id: pauserSettings
++        location: `file://${Paths.state}/wallpaper/pauser.ini`
 +        category: "WallpaperPauser"
 +        property alias pauseOnBattery: root.pauseOnBattery
 +        property alias pauseOnWindowOverlap: root.pauseOnWindowOverlap
