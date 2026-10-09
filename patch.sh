@@ -3,8 +3,15 @@
 set -euo pipefail
 
 # CONFIG
-SHELL_REPO="https://github.com/AdiAmbassador/caelestia-shell-aw.git"
-CLI_REPO="https://github.com/AdiAmbassador/caelestia-cli-aw.git"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Upstream sources pinned to the versions the AW patches in ./patches target
+SHELL_REPO="https://github.com/caelestia-dots/shell.git"
+SHELL_VERSION="2.5.0"
+SHELL_PATCH="$SCRIPT_DIR/patches/shell-v${SHELL_VERSION}.patch"
+CLI_REPO="https://github.com/caelestia-dots/cli.git"
+CLI_VERSION="1.1.3"
+CLI_PATCH="$SCRIPT_DIR/patches/cli-v${CLI_VERSION}.patch"
 
 CLI_DEST="$(python3 -c 'import site; print(site.getsitepackages()[0])')/caelestia"
 
@@ -123,8 +130,8 @@ header() {
 EOF
     echo -e "${RESET}${BOLD}		            Caelestia Animated Wallpaper Patch Installer${RESET}"
     echo -e "${DIM}                                A feature addition fork of Caelestia${RESET}"
-    echo -e "${DIM}                                           Version: 1.1.4${RESET}"
-    echo -e "${DIM}                                      Patches: Caelestia 2.3.0${RESET}"
+    echo -e "${DIM}                                           Version: 1.1.5${RESET}"
+    echo -e "${DIM}                                      Patches: Caelestia ${SHELL_VERSION}${RESET}"
     echo
     echo -e "${CYAN}$BORDER${RESET}"
     echo
@@ -144,14 +151,22 @@ echo -e "${MAGENTA}Starting installation of Caelestia Animated Wallpaper patches
 echo
 
 # Clone repo
-log "Cloning online shell fork..."
-git clone --depth 1 "$SHELL_REPO" /tmp/caelestia-shell-fork >/dev/null 2>>"$LOG_FILE" &
+cleanup
+
+log "Cloning upstream shell v${SHELL_VERSION}..."
+git clone --depth 1 --branch "v${SHELL_VERSION}" "$SHELL_REPO" /tmp/caelestia-shell-fork >/dev/null 2>>"$LOG_FILE" &
 spinner $! "Cloning shell repo"
 echo
 
-log "Cloning online CLI fork..."
-git clone --depth 1 "$CLI_REPO" /tmp/caelestia-cli-fork >/dev/null 2>>"$LOG_FILE" &
+log "Cloning upstream CLI v${CLI_VERSION}..."
+git clone --depth 1 --branch "v${CLI_VERSION}" "$CLI_REPO" /tmp/caelestia-cli-fork >/dev/null 2>>"$LOG_FILE" &
 spinner $! "Cloning CLI repo"
+echo
+
+# Apply AW patches
+log "Applying animated wallpaper patches..."
+run_step "Shell patch applied" git -C /tmp/caelestia-shell-fork apply "$SHELL_PATCH"
+run_step "CLI patch applied" git -C /tmp/caelestia-cli-fork apply "$CLI_PATCH"
 echo
 
 # Dependencies
@@ -185,7 +200,7 @@ run_step "CMake configuration" cmake -B /tmp/caelestia-shell-fork/build \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_SYSCONFDIR=/etc \
     -DCMAKE_BUILD_TYPE=Release \
-    -DVERSION="2.3.0"
+    -DVERSION="$SHELL_VERSION"
 
 run_compile_step "Compiling C++ plugins" cmake --build /tmp/caelestia-shell-fork/build
 run_step "Shell files patched" sudo cmake --install /tmp/caelestia-shell-fork/build

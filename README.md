@@ -16,13 +16,13 @@ https://github.com/user-attachments/assets/47f61a0c-7610-493e-8a5c-aeed5731cdc2
 
 ------
 
-<div align="center"><sub><em>News: added v2.3.0 compatibility + keyboard RGB sync</em></sub></div>
+<div align="center"><sub><em>News: added v2.5.0 compatibility</em></sub></div>
 
 ## What is this?
 
 Caelestia-AW is a patch that adds **native animated/video wallpaper support** to Caelestia. It extends the wallpaper picker with a dedicated animated section, generates thumbnails for video files, and integrates fully with Caelestia's Material You dynamic color system.
 
-This repo contains the  patcher and uninstall script. The actual code lives in two companion repos:
+This repo contains the patcher, the uninstall script and the AW patches themselves (in [`patches/`](patches)), which are applied on top of pinned upstream releases of the Caelestia shell and CLI. The patches were originally developed in two companion repos:
 
 | Repo                                                         | What it changes                                              |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -96,7 +96,7 @@ git clone https://github.com/AdiAmbassador/caelestia-aw.git ~/.local/share/caele
 
 The patch script will:
 
-1. Copy the modified shell and CLI files into place.
+1. Clone the supported upstream shell and CLI releases, apply the patches from `patches/`, then build and install them.
 2. Install the required dependencies (`qt6-multimedia`, `ffmpeg`, `python-pillow`)
 3. Restart Caelestia automatically.
 
@@ -191,7 +191,7 @@ bash patch.sh
 ```
 
 This re-applies the patch on top of whatever version of Caelestia is currently supported.
-Current v1.1.4 of Caelestia-AW patches Caelestia-2.3.0.
+Current v1.1.5 of Caelestia-AW patches Caelestia-2.5.0 (shell v2.5.0, CLI v1.1.3).
 
 > **Note:** Updates to Caelestia-AW may be delayed from upstream Caelestia by a few or several days due to unforeseen compatibility issues. If you update vanilla Caelestia and something breaks, re-running `patch.sh` from the latest Caelestia-AW will resolve it.
 

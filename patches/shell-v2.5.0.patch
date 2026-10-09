@@ -1,0 +1,1974 @@
+From dbe46cd819bc9a3fc4d9205dfa31f26cf3da6a5f Mon Sep 17 00:00:00 2001
+From: jayvesmir <pznrcmh977@privaterelay.appleid.com>
+Date: Fri, 9 Oct 2026 18:24:23 +0200
+Subject: [PATCH] feat: animated wallpaper support (caelestia-aw) for shell
+ v2.5.0
+
+---
+ modules/background/VideoWallpaper.qml     | 214 +++++++++++
+ modules/background/Wallpaper.qml          | 421 ++++++++++++++++++----
+ modules/launcher/Content.qml              |  55 ++-
+ modules/launcher/ContentList.qml          | 106 +++++-
+ modules/launcher/WallpaperList.qml        |  31 +-
+ modules/launcher/items/AppItem.qml        |   2 +
+ modules/launcher/items/WallpaperItem.qml  | 130 ++++---
+ modules/nexus/common/WallItem.qml         |  14 +-
+ modules/nexus/pages/WallpaperAndStyle.qml |  75 +++-
+ services/Colours.qml                      |  16 +
+ services/WallpaperPauser.qml              | 147 ++++++++
+ services/Wallpapers.qml                   | 328 +++++++++++++++--
+ 12 files changed, 1333 insertions(+), 206 deletions(-)
+ create mode 100644 modules/background/VideoWallpaper.qml
+ create mode 100644 services/WallpaperPauser.qml
+
+diff --git a/modules/background/VideoWallpaper.qml b/modules/background/VideoWallpaper.qml
+new file mode 100644
+index 00000000..92b50af1
+--- /dev/null
++++ b/modules/background/VideoWallpaper.qml
+@@ -0,0 +1,214 @@
++import QtQuick
++import QtMultimedia
++
++Item {
++    id: root
++
++    property url videoSource
++    property bool autoStart: true
++
++    // Expose active player state
++    property alias playbackState: root._activePlaybackState
++    property alias mediaStatus: root._activeMediaStatus
++    property alias error: root._activeError
++    property alias errorString: root._activeErrorString
++
++    // Expose playing state for background/Wallpaper.qml
++    readonly property bool playing: playbackState === MediaPlayer.PlayingState
++
++    // Internal: track which player is active (true = A, false = B)
++    property bool _usePlayerA: true
++    property int _activePlaybackState: _usePlayerA ? playerA.playbackState : playerB.playbackState
++    property int _activeMediaStatus: _usePlayerA ? playerA.mediaStatus : playerB.mediaStatus
++    property int _activeError: _usePlayerA ? playerA.error : playerB.error
++    property string _activeErrorString: _usePlayerA ? playerA.errorString : playerB.errorString
++
++    // Prevent re-entrant swaps during load
++    property bool _swapping: false
++    property bool forceFrameRenderA: false
++    property bool forceFrameRenderB: false
++
++    function play() {
++        // Note: _swapping selects the incoming player. If play() is called during a swap,
++        // it acts on the incoming video.
++        const active = _swapping ? (_pendingSwapToA ? playerA : playerB) : (_usePlayerA ? playerA : playerB);
++        if (videoSource != "" && videoSource.toString() !== "")
++            active.play();
++    }
++
++    function pause() {
++        // Note: _swapping selects the incoming player. If pause() is called during a swap,
++        // it pauses the incoming video rather than the fading-out one.
++        const active = _swapping ? (_pendingSwapToA ? playerA : playerB) : (_usePlayerA ? playerA : playerB);
++        active.pause();
++    }
++
++    function stop() {
++        // No-op: clearing source handles cleanup
++    }
++
++    anchors.fill: parent
++
++    // ── Player A ──
++
++    VideoOutput {
++        id: outputA
++        anchors.fill: parent
++        fillMode: VideoOutput.PreserveAspectCrop
++        visible: root._usePlayerA
++    }
++
++    MediaPlayer {
++        id: playerA
++
++        videoOutput: outputA
++        audioOutput: null
++        loops: MediaPlayer.Infinite
++        autoPlay: false
++
++        onErrorOccurred: (error, errorString) => {
++            if (error !== MediaPlayer.NoError)
++                console.warn("VideoPlayer A: error:", errorString);
++        }
++
++        onPositionChanged: {
++            if (root.forceFrameRenderA && position > 0) {
++                root.forceFrameRenderA = false;
++                playerA.pause();
++            }
++        }
++
++        onMediaStatusChanged: {
++            if (mediaStatus === MediaPlayer.InvalidMedia)
++                console.warn("VideoPlayer A: invalid media:", playerA.source, playerA.errorString);
++
++            // If this is the INCOMING player and it's ready, perform the swap
++            if (!root._usePlayerA && !root._swapping && mediaStatus === MediaPlayer.LoadedMedia) {
++                root._performSwap(true);
++            }
++
++            // First load: player A loaded and is already the active player
++            if (root._usePlayerA && mediaStatus === MediaPlayer.LoadedMedia && playerB.source == "" && !root._swapping) {
++                if (root.autoStart) {
++                    playerA.play();
++                } else {
++                    root.forceFrameRenderA = true;
++                    playerA.play();
++                }
++            }
++        }
++    }
++
++    // ── Player B ──
++
++    VideoOutput {
++        id: outputB
++        anchors.fill: parent
++        fillMode: VideoOutput.PreserveAspectCrop
++        visible: !root._usePlayerA
++    }
++
++    MediaPlayer {
++        id: playerB
++
++        videoOutput: outputB
++        audioOutput: null
++        loops: MediaPlayer.Infinite
++        autoPlay: false
++
++        onErrorOccurred: (error, errorString) => {
++            if (error !== MediaPlayer.NoError)
++                console.warn("VideoPlayer B: error:", errorString);
++        }
++
++        onPositionChanged: {
++            if (root.forceFrameRenderB && position > 0) {
++                root.forceFrameRenderB = false;
++                playerB.pause();
++            }
++        }
++
++        onMediaStatusChanged: {
++            if (mediaStatus === MediaPlayer.InvalidMedia)
++                console.warn("VideoPlayer B: invalid media:", playerB.source, playerB.errorString);
++
++            // If this is the INCOMING player and it's ready, perform the swap
++            if (root._usePlayerA && !root._swapping && mediaStatus === MediaPlayer.LoadedMedia) {
++                root._performSwap(false);
++            }
++        }
++    }
++
++    // Deferred swap: store pending direction for the timer
++    property bool _pendingSwapToA: true
++
++    // Timer to defer play() so the picker UI can process click feedback
++    // before the main thread blocks on FFmpeg/Vulkan initialization (~2s).
++    Timer {
++        id: deferredPlayTimer
++        interval: 100  // ~6 frames at 60fps — enough for picker click feedback
++        repeat: false
++        onTriggered: root._executeDeferredSwap()
++    }
++
++    function _performSwap(swapToA) {
++        _swapping = true;
++        _pendingSwapToA = swapToA;
++
++        // Pause old player immediately (frees Vulkan resources, <1ms)
++        const oldPlayer = swapToA ? playerB : playerA;
++        oldPlayer.pause();
++
++        // Defer play() so picker UI gets time to render
++        deferredPlayTimer.restart();
++    }
++
++    function _executeDeferredSwap() {
++        const swapToA = _pendingSwapToA;
++        const newPlayer = swapToA ? playerA : playerB;
++        const oldPlayer = swapToA ? playerB : playerA;
++
++        if (root.autoStart) {
++            newPlayer.play();
++        } else {
++            if (swapToA)
++                root.forceFrameRenderA = true;
++            else
++                root.forceFrameRenderB = true;
++            newPlayer.play();
++        }
++
++        // Swap visibility
++        root._usePlayerA = swapToA;
++
++        // Clean up old player source asynchronously
++        Qt.callLater(() => {
++            oldPlayer.source = "";
++            root._swapping = false;
++        });
++    }
++
++    onVideoSourceChanged: {
++        if (videoSource == "" || videoSource.toString() === "") {
++            playerA.source = "";
++            playerB.source = "";
++            return;
++        }
++
++        if (playerA.source == "" && playerB.source == "") {
++            playerA.source = videoSource;
++            _usePlayerA = true;
++            return;
++        }
++
++        const inactivePlayer = _usePlayerA ? playerB : playerA;
++        inactivePlayer.source = videoSource;
++    }
++
++    Component.onCompleted: {
++        if (videoSource != "" && videoSource.toString() !== "") {
++            playerA.source = videoSource;
++            _usePlayerA = true;
++        }
++    }
++}
+diff --git a/modules/background/Wallpaper.qml b/modules/background/Wallpaper.qml
+index 1f3d4972..d4d8d181 100644
+--- a/modules/background/Wallpaper.qml
++++ b/modules/background/Wallpaper.qml
+@@ -2,134 +2,399 @@ pragma ComponentBehavior: Bound
+ 
+ import QtQuick
+ import Caelestia.Config
+-import Caelestia.I18n
++import QtQuick.Effects
++import M3Shapes
+ import qs.components
+-import qs.components.filedialog
+ import qs.components.images
+ import qs.services
+-import qs.utils
+ 
+ Item {
+     id: root
+ 
+     property string source: Wallpapers.current
+-    property CachingImage current
++    property Item current: null
+     property bool completed
++    property string settledSource: ""
++
++    readonly property string currentSchemeName: (Colours.showPreview ? Colours["previewScheme"] : Colours.scheme) || ""
++    readonly property string currentVariantName: (Colours.showPreview ? Colours["previewVariant"] : Colours.variant) || ""
++    readonly property string currentFlavourName: (Colours.showPreview ? Colours["previewFlavour"] : Colours.flavour) || ""
++    readonly property bool isDynamicScheme: root.currentSchemeName.startsWith("dynamic")
++    readonly property bool isDynamicMonochrome: root.isDynamicScheme && root.currentVariantName === "monochrome"
++    readonly property bool shouldRecolor: !!(Config.background && Config.background["wallpaperRecolor"]) && (!root.isDynamicScheme || root.isDynamicMonochrome)
++
++    readonly property var shapes: [MaterialShape.Circle, MaterialShape.Square, MaterialShape.Diamond, MaterialShape.ClamShell, MaterialShape.Pentagon, MaterialShape.Gem, MaterialShape.Clover4Leaf, MaterialShape.SoftBurst, MaterialShape.Cookie6Sided]
++
++    function toFileUrl(path) {
++        if (!path)
++            return "";
++        const clean = String(path).trim();
++        if (clean.indexOf("file://") === 0)
++            return clean;
++        if (clean[0] === "/")
++            return "file://" + clean;
++        return Qt.resolvedUrl(clean);
++    }
++
++    Timer {
++        id: coalesceTimer
++        interval: 80
++        repeat: false
++        onTriggered: root.applySourceChange()
++    }
+ 
+     onSourceChanged: {
+-        if (!source)
++        coalesceTimer.restart();
++    }
++
++    function applySourceChange() {
++        if (source === settledSource && root.current && root.current.state === "active") {
++            return;
++        }
++
++        settledSource = source;
++
++        if (!settledSource) {
++            one.state = "inactive";
++            two.state = "inactive";
+             current = null;
+-        else
+-            current = imgComp.createObject(this, {
+-                path: source
+-            });
++            return;
++        }
++
++        let nextLayer = null;
++        let prevLayer = null;
++
++        if (one.state === "active") {
++            prevLayer = one;
++            nextLayer = two;
++        } else if (two.state === "active") {
++            prevLayer = two;
++            nextLayer = one;
++        } else {
++            prevLayer = null;
++            nextLayer = one;
++        }
++
++        if (nextLayer.state === "background") {
++            nextLayer.state = "inactive";
++        }
++
++        if (prevLayer) {
++            prevLayer.state = "background";
++        }
++
++        nextLayer.path = settledSource;
++        nextLayer.state = "active";
++        root.current = nextLayer;
+     }
+ 
+     Component.onCompleted: {
+-        if (source)
+-            Qt.callLater(() => {
+-                current = imgComp.createObject(this, {
+-                    path: source
+-                });
+-                completed = true;
+-            });
++        if (source) {
++            settledSource = source;
++            one.path = settledSource;
++            one.state = "active";
++            root.current = one;
++            completed = true;
++        } else {
++            completed = true;
++        }
+     }
+ 
+     Loader {
+         asynchronous: true
+         anchors.fill: parent
+-
+         active: root.completed && !root.source
+-
+         sourceComponent: StyledRect {
+-            color: Colours.palette.m3surfaceContainer
++            color: (Colours.palette && Colours.palette.m3surfaceContainer) || "transparent"
++        }
++    }
+ 
+-            Row {
+-                anchors.centerIn: parent
+-                spacing: Tokens.spacing.largeIncreased
++    Img {
++        id: one
++    }
++    Img {
++        id: two
++    }
+ 
+-                MaterialIcon {
+-                    text: "sentiment_stressed"
+-                    color: Colours.palette.m3onSurfaceVariant
+-                    fontStyle: Tokens.font.icon.builders.extraLarge.scale(5).build()
+-                }
++    component Img: Item {
++        id: img
+ 
+-                Column {
+-                    anchors.verticalCenter: parent.verticalCenter
+-                    spacing: Tokens.spacing.small
++        property string path: ""
++        state: "inactive"
+ 
+-                    StyledText {
+-                        text: Tr.tr("Wallpaper missing?")
+-                        color: Colours.palette.m3onSurfaceVariant
+-                        font: Tokens.font.body.builders.large.size(28 * 2).weight(Font.Bold).build()
+-                    }
++        readonly property bool isVideo: Wallpapers.isVideo(path)
++        readonly property bool animsEnabled: !!Wallpapers.enableAnimation
++        readonly property string verifiedPath: path || ""
++        readonly property int fadeMs: 400
+ 
+-                    StyledRect {
+-                        implicitWidth: selectWallText.implicitWidth + Tokens.padding.extraLargeIncreased
+-                        implicitHeight: selectWallText.implicitHeight + Tokens.padding.small
++        property bool renderActive: false
++        property bool pendingVideoAnim: false
+ 
+-                        radius: Tokens.rounding.full
+-                        color: Colours.palette.m3primary
++        readonly property bool isPlayerPlaying: !!(videoChannelLoader.item && videoChannelLoader.item["playing"])
+ 
+-                        FileDialog {
+-                            id: dialog
++        anchors.fill: parent
++        opacity: 0
+ 
+-                            title: Tr.tr("Select a wallpaper")
+-                            filterLabel: Tr.tr("Image files")
+-                            filters: Images.validImageExtensions
+-                            onAccepted: path => Wallpapers.setWallpaper(path)
+-                        }
++        onIsPlayerPlayingChanged: {
++            if (isPlayerPlaying && pendingVideoAnim && isVideo && animsEnabled && state === "active") {
++                pendingVideoAnim = false;
++                maskRadius = 0;
++                maskAnim.restart();
++            }
++        }
+ 
+-                        StateLayer {
+-                            radius: parent.radius
+-                            color: Colours.palette.m3onPrimary
+-                            onClicked: dialog.open()
+-                        }
++        Timer {
++            id: cleanupTimer
++            interval: (img.animsEnabled && root.completed) ? 2600 : (img.fadeMs + 20)
++            repeat: false
++            onTriggered: img.state = "inactive"
++        }
+ 
+-                        StyledText {
+-                            id: selectWallText
++        states: [
++            State {
++                name: "active"
++                PropertyChanges {
++                    img.opacity: 1
++                    img.z: 1
++                    img.renderActive: true
++                }
++            },
++            State {
++                name: "background"
++                PropertyChanges {
++                    img.opacity: 1
++                    img.z: 0
++                    img.renderActive: true
++                }
++            },
++            State {
++                name: "inactive"
++                PropertyChanges {
++                    img.opacity: 0
++                    img.z: 0
++                    img.renderActive: false
++                }
++            }
++        ]
+ 
+-                            anchors.centerIn: parent
++        transitions: [
++            Transition {
++                from: "inactive"
++                to: "active"
++                enabled: root.completed
++                NumberAnimation {
++                    property: "opacity"
++                    duration: img.fadeMs
++                    easing.type: Easing.InOutQuad
++                }
++            }
++        ]
+ 
+-                            text: Tr.tr("Set it now!")
+-                            color: Colours.palette.m3onPrimary
+-                            font: Tokens.font.body.large
+-                        }
++        onStateChanged: {
++            if (state === "active") {
++                cleanupTimer.stop();
++                if (animsEnabled && root.completed) {
++                    if (isVideo) {
++                        pendingVideoAnim = true;
++                        maskRadius = 0;
++                    } else {
++                        pendingVideoAnim = false;
++                        maskRadius = 0;
++                        maskAnim.restart();
+                     }
++                } else {
++                    pendingVideoAnim = false;
++                    maskRadius = maxRadius;
+                 }
++            } else if (state === "background") {
++                pendingVideoAnim = false;
++                cleanupTimer.restart();
++                if (animsEnabled) {
++                    maskRadius = maxRadius;
++                    currentShape = root.shapes[Math.floor(Math.random() * root.shapes.length)];
++                }
++            } else {
++                pendingVideoAnim = false;
++                cleanupTimer.stop();
+             }
+         }
+-    }
+ 
+-    Component {
+-        id: imgComp
++        Loader {
++            id: maskLoader
++            anchors.fill: parent
++            active: img.animsEnabled
++
++            sourceComponent: Item {
++                id: maskContainer
++                anchors.fill: parent
++
++                readonly property Item maskSource: maskSourceItem
++
++                Item {
++                    id: maskWrapper
++                    anchors.fill: parent
++                    visible: img.needsMask
++                    MaterialShape {
++                        anchors.centerIn: parent
++                        width: img.maxRadius * 2
++                        height: img.maxRadius * 2
++                        shape: img.currentShape
++                        color: "white"
++                        scale: img.maxRadius > 0 ? (img.maskRadius / img.maxRadius) : 0
++                    }
++                }
++
++                ShaderEffectSource {
++                    id: maskSourceItem
++                    sourceItem: maskWrapper
++                    anchors.fill: parent
++                    hideSource: true
++                    live: img.needsMask
++                    visible: false
++                }
++            }
++        }
++
++        readonly property real maxRadius: Math.sqrt(width * width + height * height)
++        property real maskRadius: 0
++        property int currentShape: MaterialShape.Circle
+ 
+-        CachingImage {
+-            id: img
++        onMaxRadiusChanged: {
++            if (!root.completed || (!maskAnim.running && (state === "active" || state === "background"))) {
++                maskRadius = maxRadius;
++            }
++        }
++        
++        readonly property bool hasReadyContent: isVideo ? isPlayerPlaying : (thumbImg.status === Image.Ready)
++        readonly property bool needsMask: animsEnabled && img.z === 1 && hasReadyContent && img.maskRadius < (img.maxRadius - 1.5) && !!maskLoader.item
++
++        Component.onCompleted: maskRadius = maxRadius
+ 
++        Item {
++            id: contentItem
+             anchors.fill: parent
+ 
+-            opacity: 0
++            layer.enabled: img.needsMask || (root.shouldRecolor && img.renderActive)
++            layer.effect: MultiEffect {
++                maskEnabled: img.needsMask
++
++                maskSource: maskLoader.item ? maskLoader.item.maskSource : null
++
++                shadowEnabled: img.needsMask && !img.isVideo
++                shadowColor: "black"
++                shadowBlur: 1.0
++                shadowVerticalOffset: 15
++                shadowHorizontalOffset: 5
++
++                saturation: (root.shouldRecolor && root.isDynamicMonochrome) ? -1 : 0
++                colorization: (root.shouldRecolor && !root.isDynamicMonochrome) ? (Config.background ? Config.background["wallpaperRecolorStrength"] : 0) : 0
++                colorizationColor: (Colours.palette && Colours.palette.m3primary) || "transparent"
+ 
+-            onStatusChanged: {
+-                if (status === Image.Ready)
+-                    anim.start();
++                contrast: (root.shouldRecolor && root.currentFlavourName === "hard") ? 0.45 : 0.0
++
++                Behavior on saturation {
++                    enabled: img.animsEnabled && img.state === "active"
++                    Anim {
++                        type: Anim.DefaultEffects
++                    }
++                }
++                Behavior on colorization {
++                    enabled: img.animsEnabled && img.state === "active"
++                    Anim {
++                        type: Anim.DefaultEffects
++                    }
++                }
++                Behavior on contrast {
++                    enabled: img.animsEnabled && img.state === "active"
++                    Anim {
++                        type: Anim.DefaultEffects
++                    }
++                }
++                Behavior on colorizationColor {
++                    enabled: img.animsEnabled && img.state === "active"
++                    CAnim {}
++                }
+             }
+ 
+-            Anim on opacity {
+-                id: anim
++            CachingImage {
++                id: thumbImg
++                anchors.fill: parent
++                path: img.verifiedPath
++                source: {
++                    if (!img.verifiedPath)
++                        return "";
++                    if (img.isVideo) {
++                        const thumb = Wallpapers.getWallpaperThumb(img.verifiedPath, Wallpapers.cacheBuster);
++                        return typeof thumb === "string" ? thumb : "";
++                    }
++                    return img.verifiedPath;
++                }
++
++                visible: !img.isVideo || (!img.isPlayerPlaying && videoChannelLoader.status !== Loader.Ready)
++                asynchronous: true
+ 
+-                type: Anim.SlowEffects
+-                running: false
+-                from: 0
+-                to: 1
++                onStatusChanged: {
++                    if (status === Image.Ready && !img.isVideo && img.verifiedPath === root.settledSource)
++                        root.current = img;
++                }
+             }
+ 
+-            Timer {
+-                running: root.current !== img && root.current?.status === Image.Ready
+-                interval: anim.duration
+-                onTriggered: img.destroy()
++            Loader {
++                id: videoChannelLoader
++                anchors.fill: parent
++                asynchronous: true
++
++                active: img.isVideo && img.verifiedPath !== "" && img.renderActive
++                source: "VideoWallpaper.qml"
++
++                Timer {
++                    id: resumeTimer
++                    interval: 150
++                    repeat: false
++                    onTriggered: {
++                        if (videoChannelLoader.item && img.isVideo && !WallpaperPauser.paused && img.state === "active") {
++                            videoChannelLoader.item["stop"]();
++                            videoChannelLoader.item["play"]();
++                        }
++                    }
++                }
++
++                Connections {
++                    target: WallpaperPauser
++                    ignoreUnknownSignals: true
++                    enabled: img.isVideo && videoChannelLoader.active
++
++                    function onPausedChanged() {
++                        if (videoChannelLoader.item && img.isVideo) {
++                            if (WallpaperPauser.paused) {
++                                resumeTimer.stop();
++                                videoChannelLoader.item["pause"]();
++                            } else {
++                                if (img.state === "active") {
++                                    resumeTimer.restart();
++                                }
++                            }
++                        }
++                    }
++                }
++
++                onLoaded: {
++                    if (item && img.verifiedPath !== "") {
++                        item.videoSource = root.toFileUrl(img.verifiedPath);
++                        item.autoStart = !WallpaperPauser.paused;
++                    }
++                }
+             }
+         }
++
++        Anim {
++            id: maskAnim
++            target: img
++            property: "maskRadius"
++            from: 0
++            to: img.maxRadius
++            type: Anim.Emphasized
++            duration: 2500
++        }
+     }
+ }
+diff --git a/modules/launcher/Content.qml b/modules/launcher/Content.qml
+index f5058f04..0f217311 100644
+--- a/modules/launcher/Content.qml
++++ b/modules/launcher/Content.qml
+@@ -63,21 +63,25 @@ Item {
+ 
+         onAccepted: {
+             const currentItem = list.currentList?.currentItem;
+-            if (currentItem) {
+-                if (list.showWallpapers) {
+-                    if (Colours.scheme === "dynamic" && currentItem.modelData.path !== Wallpapers.actualCurrent)
+-                        Wallpapers.previewColourLock = true;
+-                    Wallpapers.setWallpaper(currentItem.modelData.path);
+-                    root.screenState.launcher = false;
+-                } else if (text.startsWith(GlobalConfig.launcher.actionPrefix)) {
+-                    if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}calc `))
+-                        currentItem.onClicked();
+-                    else
+-                        currentItem.modelData.onClicked(list.currentList);
+-                } else {
+-                    Apps.launch(currentItem.modelData);
+-                    root.screenState.launcher = false;
+-                }
++            if (!currentItem)
++                return;
++
++            if (list.showWallpapers) {
++                const path = currentItem.modelData.path;
++                if (Colours.scheme === "dynamic" && path !== Wallpapers.actualCurrent)
++                    Wallpapers.previewColourLock = true;
++                Wallpapers.setWallpaper(path);
++                root.screenState.launcher = false;
++                return;
++            }
++
++            if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}calc `)) {
++                currentItem.onClicked();
++            } else if (text.startsWith(GlobalConfig.launcher.actionPrefix)) {
++                currentItem.modelData.onClicked(list.currentList);
++            } else {
++                Apps.launch(currentItem.modelData);
++                root.screenState.launcher = false;
+             }
+         }
+ 
+@@ -87,6 +91,17 @@ Item {
+         Keys.onEscapePressed: root.screenState.launcher = false
+ 
+         Keys.onPressed: event => {
++            // Ctrl + Tab now switches between static and animated tabs.
++            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Tab) {
++                if (Wallpapers.wallpaperMode === "static") {
++                    Wallpapers.setWallpaperMode("animated");
++                } else {
++                    Wallpapers.setWallpaperMode("static");
++                }
++                event.accepted = true;
++                return;
++            }
++
+             if (!GlobalConfig.launcher.vimKeybinds)
+                 return;
+ 
+@@ -107,7 +122,15 @@ Item {
+             }
+         }
+ 
+-        Component.onCompleted: forceActiveFocus()
++        Component.onCompleted: {
++            forceActiveFocus();
++            if (Wallpapers.restoreWallpaperMode) {
++                const target = `${GlobalConfig.launcher.actionPrefix}wallpaper `;
++                if (text !== target)
++                    text = target;
++                Wallpapers.restoreWallpaperMode = false;
++            }
++        }
+ 
+         Connections {
+             function onLauncherChanged(): void {
+diff --git a/modules/launcher/ContentList.qml b/modules/launcher/ContentList.qml
+index a2e25901..627bb338 100644
+--- a/modules/launcher/ContentList.qml
++++ b/modules/launcher/ContentList.qml
+@@ -1,6 +1,7 @@
+ pragma ComponentBehavior: Bound
+ 
+ import QtQuick
++import QtQuick.Layouts
+ import Caelestia.Config
+ import Caelestia.I18n
+ import qs.components
+@@ -20,7 +21,7 @@ Item {
+     required property int rounding
+ 
+     readonly property bool showWallpapers: search.text.startsWith(`${GlobalConfig.launcher.actionPrefix}wallpaper `)
+-    readonly property var currentList: showWallpapers ? wallpaperList.item : appList.item // Can be either ListView or PathView, so can't type properly
++    readonly property var currentList: showWallpapers ? (wallpaperList.item ? wallpaperList.item.realList : null) : appList.item
+     property string animState: showWallpapers ? "wallpapers" : "apps"
+ 
+     anchors.horizontalCenter: parent.horizontalCenter
+@@ -49,8 +50,8 @@ Item {
+ 
+             PropertyChanges {
+                 root.implicitWidth: Math.max(root.Tokens.sizes.launcher.itemWidth * 1.2, wallpaperList.implicitWidth)
+-                root.implicitHeight: root.Tokens.sizes.launcher.wallpaperHeight
+-                wallpaperList.active: true
++                root.implicitHeight: root.Tokens.sizes.launcher.wallpaperHeight + 56
++                wallpaperList.active: root.screenState.launcher
+             }
+         }
+     ]
+@@ -64,7 +65,6 @@ Item {
+                 to: 0
+                 type: Anim.DefaultEffects
+             }
+-            PropertyAction {}
+             Anim {
+                 target: root
+                 property: "opacity"
+@@ -100,24 +100,94 @@ Item {
+         anchors.bottom: parent.bottom
+         anchors.horizontalCenter: parent.horizontalCenter
+ 
+-        sourceComponent: WallpaperList {
+-            objectName: "launcherWallpaperList"
++        sourceComponent: ColumnLayout {
++            readonly property var realList: listComp
++            readonly property int count: listComp.count
++            spacing: root.Tokens.spacing.medium
++            implicitWidth: listComp.implicitWidth
++
++            RowLayout {
++                Layout.alignment: Qt.AlignHCenter
++                spacing: root.Tokens.spacing.medium * 1.06
++
++                IconTextButton {
++                    icon: "image"
++                    text: Tr.tr("Static")
++                    font: root.Tokens.font.label.medium
++                    isRound: true
++                    horizontalPadding: root.Tokens.padding.medium
++                    verticalPadding: root.Tokens.padding.extraSmall
++                    type: Wallpapers.wallpaperMode === "static" ? IconTextButton.Filled : IconTextButton.Tonal
++                    onClicked: Wallpapers.setWallpaperMode("static")
++                }
++
++                IconTextButton {
++                    icon: "movie"
++                    text: Tr.tr("Animated")
++                    font: root.Tokens.font.label.medium
++                    isRound: true
++                    horizontalPadding: root.Tokens.padding.medium
++                    verticalPadding: root.Tokens.padding.extraSmall
++                    type: Wallpapers.wallpaperMode === "animated" ? IconTextButton.Filled : IconTextButton.Tonal
++                    onClicked: Wallpapers.setWallpaperMode("animated")
++                }
++
++                IconTextButton {
++                    icon: "refresh"
++                    text: Tr.tr("Refresh")
++                    font: root.Tokens.font.label.medium
++                    isRound: true
++                    horizontalPadding: root.Tokens.padding.medium
++                    verticalPadding: root.Tokens.padding.extraSmall
++                    visible: Wallpapers.wallpaperMode === "animated"
++                    type: IconTextButton.Tonal
++                    onClicked: {
++                        Wallpapers.refreshAnimatedThumbs();
++                    }
++                }
++
++                Timer {
++                    id: processingDotsTimer
++                    running: Wallpapers._refreshing && Wallpapers.wallpaperMode === "animated"
++                    repeat: true
++                    interval: 400
++                    onTriggered: processingText.dotCount = (processingText.dotCount % 3) + 1
++                }
++
++                Text {
++                    id: processingText
++                    font: root.Tokens.font.label.medium
++                    color: Colours.palette.m3secondary
++                    visible: processingDotsTimer.running
++                    Layout.alignment: Qt.AlignVCenter
++
++                    property int dotCount: 1
++                    text: Tr.tr("Processing") + ".".repeat(dotCount)
++                }
++            }
+ 
+-            search: root.search
+-            screenState: root.screenState
+-            panels: root.panels
+-            content: root.content
++            WallpaperList {
++                id: listComp
++                objectName: "launcherWallpaperList"
++                Layout.fillWidth: true
++                Layout.fillHeight: true
++                search: root.search
++                screenState: root.screenState
++                panels: root.panels
++                content: root.content
++            }
+         }
+     }
+ 
+     Row {
+         id: empty
+ 
+-        opacity: root.currentList?.count === 0 ? 1 : 0
+-        scale: root.currentList?.count === 0 ? 1 : 0.5
++        readonly property int count: root.currentList?.count ?? 0
++        opacity: count === 0 ? 1 : 0
++        scale: count === 0 ? 1 : 0.5
+ 
+-        spacing: Tokens.spacing.medium
+-        padding: Tokens.padding.large
++        spacing: root.Tokens.spacing.medium
++        padding: root.Tokens.padding.large
+ 
+         anchors.horizontalCenter: parent.horizontalCenter
+         anchors.verticalCenter: parent.verticalCenter
+@@ -125,7 +195,7 @@ Item {
+         MaterialIcon {
+             text: root.state === "wallpapers" ? "wallpaper_slideshow" : "manage_search"
+             color: Colours.palette.m3onSurfaceVariant
+-            fontStyle: Tokens.font.icon.extraLarge
++            fontStyle: root.Tokens.font.icon.extraLarge
+ 
+             anchors.verticalCenter: parent.verticalCenter
+         }
+@@ -136,13 +206,13 @@ Item {
+             StyledText {
+                 text: root.state === "wallpapers" ? Tr.tr("No wallpapers found") : Tr.tr("No results")
+                 color: Colours.palette.m3onSurfaceVariant
+-                font: Tokens.font.body.builders.large.weight(Font.Medium).build()
++                font: root.Tokens.font.body.builders.large.weight(Font.Medium).build()
+             }
+ 
+             StyledText {
+                 text: root.state === "wallpapers" && Wallpapers.list.length === 0 ? Tr.tr("Try putting some wallpapers in %1").arg(Paths.shortenHome(Paths.wallsdir)) : Tr.tr("Try searching for something else")
+                 color: Colours.palette.m3onSurfaceVariant
+-                font: Tokens.font.body.medium
++                font: root.Tokens.font.body.medium
+             }
+         }
+ 
+@@ -159,13 +229,11 @@ Item {
+ 
+     Behavior on implicitWidth {
+         enabled: root.screenState.launcher
+-
+         Anim {}
+     }
+ 
+     Behavior on implicitHeight {
+         enabled: root.screenState.launcher
+-
+         Anim {}
+     }
+ }
+diff --git a/modules/launcher/WallpaperList.qml b/modules/launcher/WallpaperList.qml
+index c7047435..0379dc29 100644
+--- a/modules/launcher/WallpaperList.qml
++++ b/modules/launcher/WallpaperList.qml
+@@ -49,18 +49,37 @@ PathView {
+ 
+         readonly property string search: root.search.text.split(" ").slice(1).join(" ")
+ 
+-        values: Wallpapers.query(search)
+-        onValuesChanged: root.currentIndex = search ? 0 : values.findIndex(w => w.path === Wallpapers.actualCurrent)
++        values: {
++            // Force re-evaluation when the list changes (e.g., static <-> animated)
++            const forceUpdate = Wallpapers.list;
++            return Wallpapers.query(search);
++        }
++        onValuesChanged: {
++            const idx = values.findIndex(w => w.path === Wallpapers.actualCurrent);
++            root.currentIndex = search ? 0 : Math.max(0, idx);
++        }
+     }
+ 
+-    Component.onCompleted: currentIndex = Wallpapers.list.findIndex(w => w.path === Wallpapers.actualCurrent)
++    Component.onCompleted: {
++        currentIndex = Math.max(0, Wallpapers.list.findIndex(w => w.path === Wallpapers.actualCurrent));
++    }
+     Component.onDestruction: Wallpapers.stopPreview()
+ 
+-    onCurrentItemChanged: {
+-        if (currentItem)
+-            Wallpapers.preview((currentItem as WallpaperItem).modelData.path);
++    Timer {
++        id: previewDebounce
++        interval: 100
++        repeat: false
++        onTriggered: {
++            if (!root || !scriptModel.values)
++                return;
++            if (scriptModel.values[root.currentIndex]) {
++                Wallpapers.preview(scriptModel.values[root.currentIndex].path);
++            }
++        }
+     }
+ 
++    onCurrentIndexChanged: previewDebounce.restart()
++
+     implicitWidth: Math.min(numItems, count) * itemWidth
+     pathItemCount: numItems
+     cacheItemCount: 4
+diff --git a/modules/launcher/items/AppItem.qml b/modules/launcher/items/AppItem.qml
+index 6f14e919..05088e4e 100644
+--- a/modules/launcher/items/AppItem.qml
++++ b/modules/launcher/items/AppItem.qml
+@@ -38,6 +38,8 @@ Item {
+             asynchronous: true
+             source: Quickshell.iconPath(root.modelData?.icon, "image-missing")
+             implicitSize: parent.height * 0.8
++            width: implicitSize
++            height: implicitSize
+ 
+             anchors.verticalCenter: parent.verticalCenter
+         }
+diff --git a/modules/launcher/items/WallpaperItem.qml b/modules/launcher/items/WallpaperItem.qml
+index 66f6df33..d29881be 100644
+--- a/modules/launcher/items/WallpaperItem.qml
++++ b/modules/launcher/items/WallpaperItem.qml
+@@ -1,6 +1,7 @@
+ import QtQuick
+ import Quickshell
+ import Caelestia.Config
++import Caelestia.Images
+ import Caelestia.Models
+ import qs.components
+ import qs.components.effects
+@@ -13,81 +14,100 @@ Item {
+     required property FileSystemEntry modelData
+     required property ScreenState screenState
+ 
+-    scale: 0.5
+-    opacity: 0
++    scale: PathView.isCurrentItem ? 1 : PathView.onPath ? 0.8 : 0
++    opacity: PathView.onPath ? 1 : 0
+     z: PathView.z ?? 0 // qmllint disable missing-property
+ 
+-    Component.onCompleted: {
+-        scale = Qt.binding(() => PathView.isCurrentItem ? 1 : PathView.onPath ? 0.8 : 0);
+-        opacity = Qt.binding(() => PathView.onPath ? 1 : 0);
+-    }
+-
+     implicitWidth: image.width + Tokens.padding.medium * 2
+     implicitHeight: image.height + label.height + Tokens.spacing.extraSmall + Tokens.padding.large + Tokens.padding.medium
+ 
+-    StateLayer {
+-        radius: Tokens.rounding.large
+-        onClicked: {
+-            Wallpapers.setWallpaper(root.modelData.path);
+-            root.screenState.launcher = false;
++    Item {
++        id: popContainer
++        anchors.fill: parent
++
++        StateLayer {
++            radius: Tokens.rounding.large
++            anchors.fill: parent
++            onClicked: {
++                Wallpapers.setWallpaper(root.modelData.path);
++                root.screenState.launcher = false;
++            }
+         }
+-    }
+ 
+-    Elevation {
+-        anchors.fill: image
+-        radius: image.radius
+-        opacity: root.PathView.isCurrentItem ? 1 : 0
+-        level: 4
++        Elevation {
++            anchors.fill: image
++            radius: image.radius
++            opacity: root.PathView.isCurrentItem ? 1 : 0
++            level: 4
+ 
+-        Behavior on opacity {
+-            Anim {
+-                type: Anim.DefaultEffects
++            Behavior on opacity {
++                Anim {
++                    type: Anim.DefaultEffects
++                }
+             }
+         }
+-    }
+ 
+-    StyledClippingRect {
+-        id: image
++        StyledClippingRect {
++            id: image
+ 
+-        anchors.horizontalCenter: parent.horizontalCenter
+-        y: Tokens.padding.large
+-        color: Colours.tPalette.m3surfaceContainer
+-        radius: Tokens.rounding.large
++            anchors.horizontalCenter: parent.horizontalCenter
++            y: Tokens.padding.large
++            color: Colours.tPalette.m3surfaceContainer
++            radius: Tokens.rounding.large
+ 
+-        implicitWidth: Tokens.sizes.launcher.wallpaperWidth
+-        implicitHeight: implicitWidth / 16 * 9
++            implicitWidth: Tokens.sizes.launcher.wallpaperWidth
++            implicitHeight: implicitWidth / 16 * 9
+ 
+-        MaterialIcon {
+-            anchors.centerIn: parent
+-            text: "image"
+-            color: Colours.tPalette.m3outline
+-            fontStyle: Tokens.font.icon.builders.extraLarge.scale(2).weight(Font.DemiBold).build()
+-        }
++            MaterialIcon {
++                anchors.centerIn: parent
++                text: "image"
++                color: Colours.tPalette.m3outline
++                fontStyle: Tokens.font.icon.builders.extraLarge.scale(2).weight(Font.DemiBold).build()
++            }
+ 
+-        CachingImage {
+-            anchors.fill: parent
+-            path: root.modelData.path
+-            smooth: !root.PathView.view.moving
+-            sourceSize: {
+-                const dpr = (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1;
+-                return Qt.size(image.implicitWidth * dpr, image.implicitHeight * dpr);
++            CachingImage {
++                id: thumbImg
++                anchors.fill: parent
++                path: root.modelData.path
++                source: Wallpapers.isVideo(root.modelData.path) ? Wallpapers.getWallpaperThumb(root.modelData.path, Wallpapers.itemBusters[root.modelData.path] || Wallpapers.cacheBuster) : IUtils.urlForPath(root.modelData.path, fillMode)
++                smooth: !root.PathView.view?.moving ?? true
++                sourceSize: {
++                    const dpr = (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1;
++                    return Qt.size(image.implicitWidth * dpr, image.implicitHeight * dpr);
++                }
++
++                readonly property bool isThumbReady: !Wallpapers._refreshing || Wallpapers.itemBusters[root.modelData.path] !== undefined
++
++                opacity: isThumbReady && status === Image.Ready ? 1 : 0
++                scale: isThumbReady && status === Image.Ready ? 1 : 0.7
++
++                Behavior on opacity {
++                    Anim {
++                        type: Anim.DefaultEffects
++                    }
++                }
++                Behavior on scale {
++                    Anim {
++                        type: Anim.DefaultEffects
++                    }
++                }
+             }
+         }
+-    }
+ 
+-    StyledText {
+-        id: label
++        StyledText {
++            id: label
+ 
+-        anchors.top: image.bottom
+-        anchors.topMargin: Tokens.spacing.extraSmall
+-        anchors.horizontalCenter: parent.horizontalCenter
++            anchors.top: image.bottom
++            anchors.topMargin: Tokens.spacing.extraSmall
++            anchors.horizontalCenter: parent.horizontalCenter
+ 
+-        width: image.width - Tokens.padding.medium * 2
+-        horizontalAlignment: Text.AlignHCenter
+-        elide: Text.ElideRight
+-        renderType: Text.QtRendering
+-        text: root.modelData.relativePath
+-        font: Tokens.font.label.medium
++            width: image.width - Tokens.padding.medium * 2
++            horizontalAlignment: Text.AlignHCenter
++            elide: Text.ElideRight
++            renderType: Text.QtRendering
++            text: root.modelData.relativePath
++            font: Tokens.font.label.medium
++        }
+     }
+ 
+     Behavior on scale {
+diff --git a/modules/nexus/common/WallItem.qml b/modules/nexus/common/WallItem.qml
+index 39dd22e3..e3c9987f 100644
+--- a/modules/nexus/common/WallItem.qml
++++ b/modules/nexus/common/WallItem.qml
+@@ -11,7 +11,7 @@ import qs.services
+ Item {
+     id: root
+ 
+-    property alias source: img.source
++    property string source: ""
+     property alias text: label.text
+     property alias radius: imgWrapper.radius
+     property alias imgHeight: imgWrapper.implicitHeight
+@@ -71,6 +71,18 @@ Item {
+                 anchors.fill: parent
+                 asynchronous: true
+                 fillMode: Image.PreserveAspectCrop
++
++                source: {
++                    const src = root.source;
++                    if (!src) return "";
++                    
++                    if (Wallpapers.isVideo(src)) {
++                        const thumb = Wallpapers.getWallpaperThumb(src, Wallpapers.cacheBuster);
++                        return (typeof thumb === "string" && thumb !== "undefined") ? thumb : "";
++                    }
++                    return src;
++                }
++                
+                 sourceSize: {
+                     const dpr = (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1;
+                     return Qt.size(width * dpr, height * dpr);
+diff --git a/modules/nexus/pages/WallpaperAndStyle.qml b/modules/nexus/pages/WallpaperAndStyle.qml
+index 9d3c52b3..3bf1d474 100644
+--- a/modules/nexus/pages/WallpaperAndStyle.qml
++++ b/modules/nexus/pages/WallpaperAndStyle.qml
+@@ -14,6 +14,26 @@ import qs.modules.nexus.common
+ PageBase {
+     id: root
+ 
++    readonly property list<MenuItem> hwDecoderItems: [
++        MenuItem { text: Tr.tr("Auto") },
++        MenuItem { text: Tr.tr("Software") },
++        MenuItem { text: "VAAPI" },
++        MenuItem { text: "VDPAU" },
++        MenuItem { text: "CUDA" },
++        MenuItem { text: "Vulkan" },
++        MenuItem { text: "DRM" }
++    ]
++    readonly property list<string> hwDecoderValues: ["auto", "none", "vaapi", "vdpau", "cuda", "vulkan", "drm"]
++    readonly property var hwDecoderIndexMap: ({
++        "auto": 0, "none": 1, "vaapi": 2, "vdpau": 3,
++        "cuda": 4, "vulkan": 5, "drm": 6
++    })
++
++    function hwDecoderToIndex(val: string): int {
++        const v = (val ?? "none").toLowerCase();
++        return v in hwDecoderIndexMap ? hwDecoderIndexMap[v] : 1; // Default to software (none)
++    }
++
+     title: Tr.tr("Wallpaper & style")
+ 
+     ColumnLayout {
+@@ -28,10 +48,12 @@ PageBase {
+             Layout.alignment: Qt.AlignHCenter
+             implicitWidth: {
+                 const screen = root.nState.screen;
++                if (!screen || screen.height === 0) return 0;
+                 return implicitHeight / screen.height * screen.width;
+             }
+             implicitHeight: {
+                 const screen = root.nState.screen;
++                if (!screen || screen.width === 0) return 0;
+                 const cWidth = root.cappedWidth;
+                 return Math.min(Math.round(cWidth * 0.4), cWidth / screen.width * screen.height);
+             }
+@@ -124,7 +146,17 @@ PageBase {
+                     id: wallImg
+ 
+                     anchors.fill: parent
+-                    source: Wallpapers.current
++                    source: {
++                    	const path = Wallpapers.current;
++                    	if (!path) return "";
++
++                    	if (Wallpapers.isVideo(path)) {
++                    		const thumb = Wallpapers.getWallpaperThumb(path, Wallpapers.cacheBuster);
++                    		return (typeof thumb === "string" && thumb !== "undefined") ? thumb : "";
++                    	}
++
++                    	return path;
++                    }
+                     preventInit: wallIndicatorLoader.opacity > 0
+                     fadeOutAnim: Anim.DefaultEffects
+                     fadeInAnim: Anim.SlowEffects
+@@ -172,14 +204,54 @@ PageBase {
+         }
+ 
+         ToggleRow {
++            Layout.fillWidth: true
+             first: true
+             text: Tr.tr("Display wallpaper")
+             checked: Config.background.wallpaperEnabled
+             onToggled: GlobalConfig.background.wallpaperEnabled = checked
+         }
+ 
++        SelectRow {
++            Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
++
++            label: Tr.tr("Video Hardware Decoder")
++            menuOnTop: true
++            menuItems: root.hwDecoderItems
++            active: root.hwDecoderItems[root.hwDecoderToIndex(WallpaperPauser.hwDecoder)]
++            onSelected: item => WallpaperPauser.hwDecoder = root.hwDecoderValues[root.hwDecoderItems.indexOf(item)]
++        }
++
++        ToggleRow {
++            Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
++
++            text: Tr.tr("Pause animated wallpapers on battery")
++            checked: WallpaperPauser.pauseOnBattery
++            onToggled: WallpaperPauser.pauseOnBattery = checked
++        }
++
++        ToggleRow {
++            Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
++
++            text: Tr.tr("Pause animated wallpapers behind windows")
++            checked: WallpaperPauser.pauseOnWindowOverlap
++            onToggled: WallpaperPauser.pauseOnWindowOverlap = checked
++        }
++
++        ToggleRow {
++            Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
++
++            text: Tr.tr("Animate wallpaper transitions")
++            checked: Wallpapers.enableAnimation
++            onToggled: Wallpapers.enableAnimation = checked
++        }
++
+         ToggleRow {
+             Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
+ 
+             text: Tr.tr("Transparency")
+             // TRANSLATORS: %1/%2 = opacity values from 0 to 1 for the base surface and layered surfaces
+@@ -190,6 +262,7 @@ PageBase {
+ 
+         ToggleRow {
+             Layout.topMargin: Tokens.spacing.extraSmall / 2 - parent.spacing
++            Layout.fillWidth: true
+ 
+             last: true
+             text: Tr.tr("Dark theme")
+diff --git a/services/Colours.qml b/services/Colours.qml
+index 0b644001..6399f34f 100644
+--- a/services/Colours.qml
++++ b/services/Colours.qml
+@@ -59,6 +59,10 @@ Singleton {
+         return Qt.hsla(c.hslHue, c.hslSaturation, 0.1, 1);
+     }
+ 
++    function boostSaturation(c: color): color {
++        return Qt.hsla(c.hslHue, Math.min(1.0, c.hslSaturation * 1.1), c.hslLightness, c.a);
++    }
++
+     function load(data: string, isPreview: bool): void {
+         const colours = isPreview ? preview : current;
+         const scheme = JSON.parse(data);
+@@ -76,6 +80,18 @@ Singleton {
+             if (colours.hasOwnProperty(propName))
+                 colours[propName] = `#${colour}`;
+         }
++
++        if (!isPreview && scheme.colours.primary) {
++            try {
++                const baseColor = boostSaturation("#" + scheme.colours.primary);
++                const r = Math.round(baseColor.r * 255).toString(16).padStart(2, '0');
++                const g = Math.round(baseColor.g * 255).toString(16).padStart(2, '0');
++                const b = Math.round(baseColor.b * 255).toString(16).padStart(2, '0');
++                Quickshell.execDetached(["sh", "-c", "/usr/bin/asusctl aura effect static -c " + (r + g + b) + " > /dev/null 2>&1"]);
++            } catch (e) {
++                console.log("Could not apply keyboard color (asusctl might not be installed): " + e);
++            }
++        }
+     }
+ 
+     function setMode(mode: string): void {
+diff --git a/services/WallpaperPauser.qml b/services/WallpaperPauser.qml
+new file mode 100644
+index 00000000..bda99dc1
+--- /dev/null
++++ b/services/WallpaperPauser.qml
+@@ -0,0 +1,147 @@
++pragma Singleton
++
++import QtQuick
++import QtCore
++import Quickshell
++import Quickshell.Hyprland
++import Quickshell.Services.UPower
++import Quickshell.Io
++
++import qs.services
++
++Singleton {
++    id: root
++
++    property bool pauseOnBattery: false
++    property bool pauseOnWindowOverlap: true
++    property string hwDecoder: "none"
++
++    Settings {
++        id: pauserSettings
++        category: "WallpaperPauser"
++        property alias pauseOnBattery: root.pauseOnBattery
++        property alias pauseOnWindowOverlap: root.pauseOnWindowOverlap
++        property alias hwDecoder: root.hwDecoder
++    }
++    property bool paused: false
++    property bool _loaded: false
++    property string pauseReason: "None"
++
++    Process {
++        id: saveHwDecoderProcess
++    }
++
++    function recalculate() {
++        let newPaused = false;
++        let reason = "None";
++
++        // Rule #1 — Battery
++        if (pauseOnBattery && UPower.onBattery) {
++            newPaused = true;
++            reason = "Battery";
++        } else if (pauseOnWindowOverlap) {
++            const monitor = Hyprland.focusedMonitor;
++            const ws = monitor && monitor.activeWorkspace ? monitor.activeWorkspace : Hyprland.focusedWorkspace;
++
++            if (ws) {
++                // Strictly filter global toplevels to ONLY the focused workspace
++                const toplevels = ws.toplevels.values;
++
++                // Rule #3 — 2+ visible windows
++                if (toplevels.length >= 2) {
++                    newPaused = true;
++                    reason = "2+ windows (" + toplevels.length + " total)";
++                } else {
++                    // Rule #2 — 70% of monitor area
++                    if (monitor) {
++                        const screen = Quickshell.screens.find(s => s.name === monitor.name);
++                        if (screen) {
++                            const screenArea = screen.width * screen.height;
++                            if (screenArea > 0) {
++                                const threshold = screenArea * 0.7;
++                                for (const t of toplevels) {
++                                    const size = t.lastIpcObject?.size;
++                                    if (size && size.length >= 2 && size[0] * size[1] >= threshold) {
++                                        newPaused = true;
++                                        reason = "70% area rule by: " + (t.lastIpcObject?.title ?? "Unknown") + " (" + size[0] + "x" + size[1] + ")";
++                                        break;
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++
++        paused = newPaused;
++        root.pauseReason = reason;
++    }
++
++    Connections {
++        target: Hyprland
++        function onFocusedWorkspaceChanged() {
++            root.recalculate();
++        }
++        function onFocusedMonitorChanged() {
++            root.recalculate();
++        }
++        function onRawEvent(event) {
++            const n = event.name;
++            if (n.startsWith("workspace") || n.startsWith("activewindow") || n.startsWith("createworkspace") || n.startsWith("destroyworkspace") || ["fullscreen", "changefloatingmode", "minimize", "movewindow", "openwindow", "closewindow", "moveworkspace", "focusedmon"].includes(n)) {
++                recalcTimer.restart();
++            }
++        }
++    }
++
++    Connections {
++        target: UPower
++        function onOnBatteryChanged() {
++            recalcTimer.restart();
++        }
++    }
++
++    Timer {
++        id: recalcTimer
++        interval: 50
++        onTriggered: root.recalculate()
++    }
++
++    // Startup timer to ensure we catch the asynchronously loaded Hyprland and Quickshell state
++    Timer {
++        id: startupTimer
++        interval: 1000
++        repeat: true
++        running: true
++        property int attempts: 0
++        onTriggered: {
++            root.recalculate();
++            attempts++;
++            if (attempts >= 5) {
++                running = false;
++            }
++        }
++    }
++
++    onPauseOnBatteryChanged: {
++        recalculate();
++    }
++
++    onPauseOnWindowOverlapChanged: {
++        recalculate();
++    }
++
++    onHwDecoderChanged: {
++        // We still need to sync this to a text file because the python CLI needs to read it
++        // BEFORE the Qt application starts in order to inject the environment variables.
++        if (root._loaded) {
++            saveHwDecoderProcess.command = ["sh", "-c", "echo '" + root.hwDecoder + "' > ~/.cache/caelestia/hwDecoder.txt && nohup sh -c 'sleep 0.5 && caelestia shell -d' >/dev/null 2>&1 & caelestia shell -k"];
++            saveHwDecoderProcess.running = true;
++        }
++    }
++
++    Component.onCompleted: {
++        root._loaded = true;
++        recalculate();
++    }
++}
+diff --git a/services/Wallpapers.qml b/services/Wallpapers.qml
+index 916fc953..4313434c 100644
+--- a/services/Wallpapers.qml
++++ b/services/Wallpapers.qml
+@@ -1,6 +1,7 @@
+ pragma Singleton
+ 
+ import QtQuick
++import QtCore
+ import Quickshell
+ import Quickshell.Io
+ import Caelestia.Config
+@@ -16,12 +17,81 @@ Searcher {
+     readonly property string fallback: Quickshell.shellPath("assets/wallpaper.webp")
+ 
+     property bool showPreview: false
++    property bool enableAnimation: true
+     readonly property string current: showPreview ? previewPath : actualCurrent
+     property string previewPath
+     property string actualCurrent
+     property bool previewColourLock
+     property bool pendingPreviewClear
+ 
++    readonly property list<string> validVideoExtensions: ["mp4", "webm", "mkv"]
++    property string wallpaperMode: "static"
++    property string cacheBuster: ""
++    property string rollbackPath: ""
++    property string rollbackMode: ""
++    property bool isTrackingRollback: false
++    
++    // Track and restore the last used wallpaper per mode using low-overhead execution
++    property string lastStatic: ""
++    property string lastAnimated: ""
++
++    property var _hashCache: ({})
++
++    Timer {
++        id: colorReleaseTimer
++        interval: 180 
++        repeat: false
++        onTriggered: {
++            // Safety check: only clear the preview if no new lock has been engaged
++            if (!previewColourLock && pendingPreviewClear) {
++                Colours.showPreview = false;
++                pendingPreviewClear = false;
++            }
++        }
++    }
++
++    function djb2_hash(s) {
++        if (!s) return "0";
++        if (_hashCache[s] !== undefined) return _hashCache[s];
++
++        let h = 5381;
++        for (let i = 0; i < s.length; i++) {
++            h = ((h << 5) + h) + s.charCodeAt(i);
++            h |= 0;
++        }
++        const res = (h >>> 0).toString(10);
++        _hashCache[s] = res;
++        return res;
++    }
++
++    function getWallpaperThumb(path, buster) {
++        let clean = String(path || "").split(/[?#]/)[0];
++        if (clean.indexOf("file://") === 0) clean = clean.substring(7);
++        let b = buster !== undefined ? buster : cacheBuster;
++        return "file://" + Paths.cache + "/videothumbs/" + djb2_hash(clean) + ".jpg" + (b ? "?v=" + b : "");
++    }
++
++    function isVideo(path: string): bool {
++        if (!path) return false;
++        const clean = String(path).split(/[?#]/)[0].toLowerCase();
++        const index = clean.lastIndexOf(".");
++        const ext = index >= 0 ? clean.slice(index + 1) : "";
++        return validVideoExtensions.includes(ext);
++    }
++
++    function indexOf(path: string): int {
++        if (!path) return -1;
++        let clean = String(path).split(/[?#]/)[0];
++        if (clean.indexOf("file://") === 0) clean = clean.substring(7);
++
++        for (let i = 0; i < list.length; i++) {
++            let p = String(list[i].path || "").split(/[?#]/)[0];
++            if (p.indexOf("file://") === 0) p = p.substring(7);
++            if (p === clean) return i;
++        }
++        return -1;
++    }
++
+     function getCategoryFor(w: FileSystemEntry): string {
+         let category = w.parentDir.slice(Paths.wallsdir.length + 1);
+         if (category.includes("/"))
+@@ -29,57 +99,143 @@ Searcher {
+         return category;
+     }
+ 
++    function setWallpaperMode(mode) {
++        wallpaperMode = mode;
++    }
++
++    function captureRollbackState() {
++        if (!isTrackingRollback) {
++            rollbackPath = actualCurrent;
++            rollbackMode = wallpaperMode;
++            isTrackingRollback = true;
++        }
++    }
++
++    onWallpaperModeChanged: {
++        captureRollbackState();
++        
++        const target = wallpaperMode === "animated" ? lastAnimated : lastStatic;
++
++        if (target !== "") {
++            actualCurrent = target;
++            if (showPreview) {
++                previewPath = target;
++                if (String(Colours.scheme).startsWith("dynamic")) {
++                    if (!getPreviewColoursProc.running) {
++                        getPreviewColoursProc.startFor(target);
++                    }
++                }
++            } else {
++                Quickshell.execDetached(["caelestia", "wallpaper", "-f", target, ...smartArg]);
++            }
++        }
++    }
++
++    onEnableAnimationChanged: {
++        Quickshell.execDetached(["sh", "-c", "mkdir -p '" + Paths.state + "/wallpaper' && echo '" + (enableAnimation ? "1" : "0") + "' > '" + Paths.state + "/wallpaper/enable_animation.txt'"]);
++    }
++
+     function setRandom(): void {
+         Quickshell.execDetached(["caelestia", "wallpaper", "-r", ...smartArg]);
+     }
+ 
+     function setWallpaper(path: string): void {
+-        actualCurrent = path;
+-        Quickshell.execDetached(["caelestia", "wallpaper", "-f", path, ...smartArg]);
++        let clean = String(path || "").split(/[?#]/)[0];
++        if (clean.indexOf("file://") === 0) clean = clean.substring(7);
++        if (!clean) return;
++
++        actualCurrent = clean;
++        isTrackingRollback = false;
++
++        // Hold the preview palette locked while the backend executes
++        previewColourLock = true;
++        pendingPreviewClear = false;
++        
++        if (isVideo(clean)) {
++            lastAnimated = clean;
++            wallpaperMode = "animated";
++            // Save animated path to disk
++            Quickshell.execDetached(["sh", "-c", "mkdir -p '" + Paths.state + "/wallpaper' && echo '" + clean + "' > '" + Paths.state + "/wallpaper/last_animated.txt'"]);
++        } else {
++            lastStatic = clean;
++            wallpaperMode = "static";
++            // Save static path to disk
++            Quickshell.execDetached(["sh", "-c", "mkdir -p '" + Paths.state + "/wallpaper' && echo '" + clean + "' > '" + Paths.state + "/wallpaper/last_static.txt'"]);
++        }
++
++        stopPreview();
++        
++        Quickshell.execDetached(["caelestia", "wallpaper", "-f", clean, ...smartArg]);
+     }
+ 
+     function preview(path: string): void {
+-        previewPath = path;
++        captureRollbackState();
++        
++        let clean = String(path || "").split(/[?#]/)[0];
++        if (clean.indexOf("file://") === 0) clean = clean.substring(7);
++        if (!clean) return;
++
++        if (previewPath === clean && showPreview) return;
++
++        previewPath = clean;
+         showPreview = true;
+ 
+-        if (Colours.scheme === "dynamic")
+-            getPreviewColoursProc.running = true;
++        if (String(Colours.scheme).startsWith("dynamic")) {
++            if (!getPreviewColoursProc.running) {
++                getPreviewColoursProc.startFor(clean);
++            }
++        }
+     }
+ 
+     function stopPreview(): void {
+         showPreview = false;
+-        if (previewColourLock)
++        
++        if (getPreviewColoursProc.running) {
++            getPreviewColoursProc.running = false;
++        }
++
++        if (isTrackingRollback) {
++            wallpaperMode = rollbackMode;
++            actualCurrent = rollbackPath;
++            isTrackingRollback = false;
++            
++            Quickshell.execDetached(["caelestia", "wallpaper", "-f", rollbackPath, ...smartArg]);
++        }
++
++        if (previewColourLock) {
+             pendingPreviewClear = true;
+-        else
++        } else {
+             Colours.showPreview = false;
++            pendingPreviewClear = false;
++        }
+     }
+ 
+     onPreviewColourLockChanged: {
+-        if (!previewColourLock && pendingPreviewClear)
+-            Colours.showPreview = false;
++        if (!previewColourLock && pendingPreviewClear) {
++            colorReleaseTimer.restart();
++        }
+     }
+ 
+-    list: wallpapers.entries
++    list: wallpaperMode === "animated" ? animatedWallpapers.entries : staticWallpapers.entries
+     key: "relativePath"
+     useFuzzy: GlobalConfig.launcher.useFuzzy.wallpapers
+-    extraOpts: useFuzzy ? ({}) : ({
+-            forward: false
+-        })
++    extraOpts: useFuzzy ? ({}) : ({ forward: false })
+ 
+     IpcHandler {
+-        function get(): string {
+-            return root.actualCurrent;
+-        }
+-
+-        function set(path: string): void {
+-            root.setWallpaper(path);
+-        }
++        function get(): string { return root.actualCurrent; }
++        function set(path: string): void { root.setWallpaper(path); }
++        function list(): string { return root.list.map(w => w.path).join("\n"); }
++        target: "wallpaper"
++    }
+ 
+-        function list(): string {
+-            return root.list.map(w => w.path).join("\n");
++    FileView {
++        path: `${Paths.state}/wallpaper/enable_animation.txt`
++        printErrors: false
++        onLoaded: {
++            const val = text().trim();
++            if (val === "0") root.enableAnimation = false;
++            else if (val === "1") root.enableAnimation = true;
+         }
+-
+-        target: "wallpaper"
+     }
+ 
+     FileView {
+@@ -95,6 +251,15 @@ Searcher {
+             }
+             root.actualCurrent = wall;
+             root.previewColourLock = false;
++
++            // Set initial wallpaper mode based on current file type on boot
++            if (root.isVideo(root.actualCurrent)) {
++                wallpaperMode = "animated";
++                if (!root.lastAnimated) root.lastAnimated = wall;
++            } else {
++                wallpaperMode = "static";
++                if (!root.lastStatic) root.lastStatic = wall;
++            }
+         }
+         onLoadFailed: {
+             root.actualCurrent = root.fallback;
+@@ -103,23 +268,126 @@ Searcher {
+         }
+     }
+ 
+-    FileSystemModel {
+-        id: wallpapers
++    // Read persisted static wallpaper state on startup
++    FileView {
++        path: `${Paths.state}/wallpaper/last_static.txt`
++        printErrors: false
++        onLoaded: {
++            const val = text().trim();
++            if (val) root.lastStatic = val;
++        }
++    }
++    
++    // Read persisted animated wallpaper state on startup
++    FileView {
++        path: `${Paths.state}/wallpaper/last_animated.txt`
++        printErrors: false
++        onLoaded: {
++            const val = text().trim();
++            if (val) root.lastAnimated = val;
++        }
++    }
+ 
++    FileSystemModel {
++        id: staticWallpapers
++        watchChanges: true
+         recursive: true
+         path: Paths.wallsdir
+-        filter: FileSystemModel.Images
++        filter: FileSystemModel.Files
++        nameFilters: ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.tif", "*.tiff", "*.svg", "*.gif"]
++    }
++
++    FileSystemModel {
++        id: animatedWallpapers
++        watchChanges: true
++        recursive: true
++        path: Paths.wallsdir + "/Animated"
++        filter: FileSystemModel.Files
++        nameFilters: ["*.mp4", "*.webm", "*.mkv"]
+     }
+ 
+     Process {
+         id: getPreviewColoursProc
+ 
+-        command: ["caelestia", "wallpaper", "-p", root.previewPath, ...root.smartArg]
++        property string currentProcessingPath: ""
++
++        command: ["caelestia", "wallpaper", "-p", currentProcessingPath, ...root.smartArg]
++
++        function startFor(path) {
++            if (!path) return;
++            currentProcessingPath = path;
++            running = true;
++        }
++
+         stdout: StdioCollector {
+             onStreamFinished: {
+-                Colours.load(text, true);
+-                Colours.showPreview = true;
++                if (!root.showPreview) return;
++
++                const raw = text ? text.trim() : "";
++                if (raw) {
++                    try {
++                        JSON.parse(raw);
++                        Colours.load(raw, true);
++                        Colours.showPreview = true;
++                    } catch (e) {
++                        // Ignore incomplete or invalid output during cancellation
++                    }
++                }
++
++                if (root.showPreview && root.previewPath !== "" && root.previewPath !== getPreviewColoursProc.currentProcessingPath) {
++                    getPreviewColoursProc.startFor(root.previewPath);
++                }
++            }
++        }
++    }
++
++    property bool _refreshing: false
++    property bool restoreWallpaperMode: false
++    property var itemBusters: ({})
++
++    FileView {
++        path: "/tmp/caelestia_thumb_ready.txt"
++        watchChanges: true
++        printErrors: false
++        onLoaded: {
++            const raw = text().trim();
++            if (!raw) return;
++            
++            const lines = raw.split("\n");
++            let busters = Object.assign({}, root.itemBusters);
++            let changed = false;
++            const now = Date.now().toString();
++
++            for (let i = 0; i < lines.length; i++) {
++                let line = lines[i].trim();
++                if (line.indexOf("file://") === 0) line = line.substring(7);
++                if (line && !busters[line]) {
++                    busters[line] = now;
++                    busters["file://" + line] = now;
++                    changed = true;
++                }
++            }
++            if (changed) {
++                root.itemBusters = busters;
+             }
+         }
+     }
++
++    function refreshAnimatedThumbs() {
++        if (_refreshing) return;
++        itemBusters = {};
++        _refreshing = true;
++        _extractThumbsProc.running = true;
++    }
++
++    Process {
++        id: _extractThumbsProc
++
++        command: ["caelestia", "wallpaper", "--extract-thumbs"]
++        onExited: (exitCode, exitStatus) => {
++            root._refreshing = false;
++            root.cacheBuster = Date.now().toString();
++            root.restoreWallpaperMode = true;
++        }
++    }
+ }
